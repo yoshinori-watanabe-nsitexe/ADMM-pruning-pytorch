@@ -15,7 +15,7 @@ from torch.utils.data import random_split
 
 from model import LeNet
 
-prune_percent = 92
+
 
 def projection(weight_arr,percent = 10):
     pcen = np.percentile(abs(weight_arr),percent)
@@ -34,12 +34,12 @@ def prune_weight(w,percent):
 def apply_prune(W,prune_percent):
     masks=[]
     for w in W:
-        print ("before pruning #non zero parameters " + str(np.sum(w=0)))
-        before = np.sum(w!=0)
+        print ("before pruning #non zero parameters " + str(torch.sum(w==0)))
+        before = torch.sum(w!=0)
         mask,w_pruned = prune_weight(w,prune_percent)
-        after = np.sum(w_pruned!=0)
+        after = torch.sum(w_pruned!=0)
         print ("pruned "+ str(before-after))
-        print ("after prunning #non zero parameters " + str(np.sum(w_pruned!=0)))
+        print ("after prunning #non zero parameters " + str(torch.sum(w_pruned!=0)))
         w.data=w_pruned
         masks.append(mask)
     return masks
@@ -115,8 +115,6 @@ def main(args):
     U=[torch.zeros_like(w) for w in W]
     Z=[torch.zeros_like(w) for w in W]
     
-    #grads=[w.data.grad() for w in params]
-
     criterion = nn.CrossEntropyLoss()
 
     if(args.opt=="Adam"):
@@ -125,84 +123,97 @@ def main(args):
         optimizer = optim.SGD(model.parameters(), lr=0.01)
 
     #initial training
-    for epoch in range(num_epochs):
-        for i, d in enumerate(tqdm(dataloader_train)):
-            inputs, targets = d
-            optimizer.zero_grad()
+    with open(f"trainingloss_lenet_5_{args.dataset}_initial.csv","w") as fp:
+        for epoch in range(num_epochs):
+            for i, d in enumerate(tqdm(dataloader_train)):
+                optimizer.zero_grad()
+                inputs, targets = d
 
-            outputs = model(inputs)
+                outputs = model(inputs)
 
-            #https://python-code.dev/articles/242716633
-#            outputs_softmax = nn.functional.log_softmax(outputs, dim=1)  
-#            print("outputs",outputs,"shape",outputs.shape)
-#            print("outputs_softmax",outputs_softmax,"shape",outputs_softmax.shape)
-#            print("label",targets)
-            
-            loss = loss_with_l2(outputs,targets,model,criterion)
-            loss.backward()
-            optimizer.step()
-            if(i>max_iteration):
-                break
-
+                #https://python-code.dev/articles/242716633
+                loss = loss_with_l2(outputs,targets,model,criterion)
+                loss.backward()
+                optimizer.step()
+                if i % 1000 == 0:
+                    print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}')
+                    fp.write(f'Epoch,{epoch+1}, {loss.item():.4f}')
+                if(i>max_iteration):
+                    break
+    
     print_accuracy(model,dataloader_test)
 
-    torch.save(model,"lenet_5_simple_model.pt")
+    torch.save(model,f"lenet_5_{args.dataset}_simple_model.pt")
 
     Z=[projection(w,threash) for w in W]
 
     #ADMM training
-    for epoch in range(num_epochs):
-        for j, d in enumerate(tqdm(dataloader_train2)):
-            inputs, targets = d
-        
-            print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}')
-            outputs = model(inputs)
-            
-            loss = loss_with_l2_A(outputs,targets,model,U,Z,criterion)
-            loss.backward()
-            optimizer.step()
+    print("ADMM training")
+    with open(f"trainingloss_lenet_5_{args.dataset}_ADMMtraining.csv","w") as fp:
+        for epoch in range(num_epochs):
+            for j, d in enumerate(tqdm(dataloader_train2)):
+                optimizer.zero_grad()
+                inputs, targets = d
 
-        for i ,w in enumerate(W):
-            Z[i]=projection(w+U[i],threash)
-            U[i]=U[i]+w-Z[i]
+                outputs = model(inputs)
+                
+                loss = loss_with_l2_A(outputs,targets,model,U,Z,criterion)
+                loss.backward()
+                optimizer.step()
+                if j % 1000 == 0:
+                    print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}')
+                    fp.write(f'Epoch,{epoch+1}, {loss.item():.4f}')
+                    
+            for i ,w in enumerate(W):
+                Z[i]=projection(w+U[i],threash)
+                U[i]=U[i]+w-Z[i]
 
-        print_accuracy(model,dataloader_test)
+                if(j>max_iteration):
+                    break
 
-    masks=apply_prune(W,threash)
+    print_accuracy(model,dataloader_test)
+
+    masks=apply_prune(W,args.percent)
+
     # Specify the parameters to update  
     #optimizer01 = optim.SGD([  {'params': nonpruned_w} ], lr=0.01)  
-    torch.save(model,"lenet_5_simple_model.pt")    
-
+    torch.save(model,f"lenet_5_{args.dataset}_simple_model.pt")    
+    
+    #grads=[w.data.grad() for w in params]
     print ("start retraining after pruning")
 
-    for i, d in enumerate(tqdm(dataloader_train2)):
-      inputs, targets = d
-    #for inputs, targets in dataloader_train2:
-      optimizer.zero_grad()
-      outputs = model(inputs)
+    with open(f"trainingloss_lenet_5_{args.dataset}_afterpruning.csv","w") as fp:
+        for i, d in enumerate(tqdm(dataloader_train2)):
+            optimizer.zero_grad()
 
-      loss = loss_with_l2(outputs,targets,model,criterion)
-      loss.backward()
-      #https://ohke.hateblo.jp/entry/2019/12/07/230000
-      #param_b = (param_b - param_b.grad * learning_rate).detach().requires_grad_()
-      #   with torch.no_grad():  
-      for p,m in zip(model.parameters(),masks):
-         p=(p-p.grad*m*lr).detach().requires_grad_()
-      
-      #optimizer01.step()
-      #apply_gradient_op.run(feed_dict={x: batch[0], y_: batch[1], keep_prob: 0.5})
-      
-      if i % 1000 == 0:
-        print_accuracy(model,dataloader_train)
+            inputs, targets = d
+            outputs = model(inputs)
 
+            loss = loss_with_l2(outputs,targets,model,criterion)
+            loss.backward()
+            #https://ohke.hateblo.jp/entry/2019/12/07/230000
+            #param_b = (param_b - param_b.grad * learning_rate).detach().requires_grad_()
+            #   with torch.no_grad():  
+            for p,m in zip(model.parameters(),masks):
+                p=(p-p.grad*m*lr).detach().requires_grad_()
+            
+            #optimizer01.step()
+            #apply_gradient_op.run(feed_dict={x: batch[0], y_: batch[1], keep_prob: 0.5})
+            
+            if i % 1000 == 0:
+                print_accuracy(model,dataloader_train)
+            fp.write(f'Epoch,{epoch+1}, {loss.item():.4f}')
+            if(i>max_iteration):
+                break
 
     print_accuracy(model,dataloader_test)
     for w in W:
-        print(np.sum(w.data!=0))
+        print(torch.sum(w.data!=0))
 
-    torch.save(model,"lenet_5_pruned_model.pt")
+    torch.save(model,f"lenet_5_{args.dataset}_pruned_model.pt")
     #torch.save(model.state_dict(),"lenet_5_pruned_model.pth")
-
+    print("### Finish. ###")
+    
 if __name__ == '__main__':
   parser = argparse.ArgumentParser()
   parser.add_argument('--data_dir', type=str,default='data', help='Directory for storing input data')
@@ -213,6 +224,7 @@ if __name__ == '__main__':
   parser.add_argument('-th', '--threshold',default=0.001,type=float)
   parser.add_argument('-opt', '--opt',default="SGD")    
   parser.add_argument('-m', '--max_iteration',default=1000000,type=int)
+  parser.add_argument('-p', '--percent',default=92,type=int)
 
   FLAGS, unparsed = parser.parse_known_args()
   args = parser.parse_args()
